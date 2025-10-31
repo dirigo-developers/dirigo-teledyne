@@ -399,22 +399,32 @@ class TeledyneTrigger(digitizer.Trigger):
             raise NotImplementedError("Triggering on Channels not implemented yet")
         else:
             raise RuntimeError("Invalid trigger source")
-        
+    
+    # ADQ32 supports 
     @property
-    def external_coupling(self):
-        pass
+    def external_coupling(self) -> digitizer.ExternalTriggerCoupling:
+        # Teledyne ADQ32 only supports DC coupling for external triggers
+        return digitizer.ExternalTriggerCoupling.DC 
+    
+    @external_coupling.setter
+    def external_coupling(self, external_coupling: digitizer.ExternalTriggerCoupling):
+        if external_coupling not in self.external_coupling_options:
+            raise ValueError(f"Unsupported external trigger coupling mode: {external_coupling}. "
+                             f"Supported: {self.external_coupling_options}")
+        self._external_coupling = external_coupling
 
     @property
-    def external_coupling_options(self):
-        pass
+    def external_coupling_options(self) -> set[digitizer.ExternalTriggerCoupling]:
+        # Teledyne ADQ32 only supports DC coupling for external triggers
+        return {digitizer.ExternalTriggerCoupling.DC}
 
     @property
-    def external_range(self):
-        pass
+    def external_range(self): # this doesn't quite make sense here
+        return units.VoltageRange("0 V", "2.8 V")
 
     @property
     def external_range_options(self):
-        pass
+        return {units.VoltageRange("0 V", "2.8 V")}
         
 
 
