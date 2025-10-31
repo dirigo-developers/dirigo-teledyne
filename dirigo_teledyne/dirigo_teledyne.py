@@ -9,7 +9,6 @@ from dirigo.hw_interfaces import digitizer
 from dirigo.sw_interfaces.acquisition import AcquisitionProduct
 
 
-
 """
 Teledyne ADQ digitizer implementation for Dirigo.
 
@@ -24,7 +23,6 @@ Classes:
     TeledyneAcquire: Handles acquisition logic and data transfer.
     TeledyneDigitizer: Combines the above components into a digitizer interface.
 """
-
 
 
 class TeledyneChannel(digitizer.Channel):
@@ -283,6 +281,7 @@ class TeledyneTrigger(digitizer.Trigger):
     for channels A & B, but this is not supported in Dirigo.
     """
     _trigger_source_mapping = {
+        digitizer.TriggerSource.INTERNAL:   pyadq.ADQ_EVENT_SOURCE_SOFTWARE,
         digitizer.TriggerSource.EXTERNAL:   pyadq.ADQ_EVENT_SOURCE_TRIG,
         digitizer.TriggerSource.CHANNEL_A:  pyadq.ADQ_EVENT_SOURCE_LEVEL_CHANNEL0,
         digitizer.TriggerSource.CHANNEL_B:  pyadq.ADQ_EVENT_SOURCE_LEVEL_CHANNEL1,
@@ -302,14 +301,19 @@ class TeledyneTrigger(digitizer.Trigger):
         self._slope: digitizer.TriggerSlope | None = None
         self._external_coupling: digitizer.ExternalTriggerCoupling | None = None
         self._external_range: units.VoltageRange | digitizer.ExternalTriggerRange | None = None
-        self._level: units.Voltage = units.Voltage("0 V")
 
-    def _get_acq_params(self):
+    def _get_acq_params(self) -> pyadq.ADQDataAcquisitionParameters:
         return cast(
             pyadq.ADQDataAcquisitionParameters,
             self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_DATA_ACQUISITION)
         )
     
+    def _get_event_source_trig_params(self) -> pyadq.ADQEventSourcePortParameters:
+        return cast(
+            pyadq.ADQEventSourcePortParameters,
+            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_EVENT_SOURCE_TRIG)
+        )
+
     @property
     def source(self) -> digitizer.TriggerSource:
         acq_params = self._get_acq_params()
@@ -323,6 +327,14 @@ class TeledyneTrigger(digitizer.Trigger):
                              f"Valid options are: {self.source_options}")
         acq_params = self._get_acq_params()
         for i in range(len(self._chans)):
+            # HACK: initially both channels are disabled, meaning that record_length
+            # and nof_records = 0. Changing any acqusition parameters (e.g. trigger
+            # source) is ignored for disabled channels. Increment these to allow
+            # new values for source to stick.
+            if acq_params.channel[i].record_length <= 0:
+                acq_params.channel[i].record_length = 64
+            if acq_params.channel[i].nof_records <= 0:
+                acq_params.channel[i].nof_records = 1
             acq_params.channel[i].trigger_source = self._trigger_source_mapping[source]
         self._dev.SetParameters(acq_params)
     
@@ -363,6 +375,47 @@ class TeledyneTrigger(digitizer.Trigger):
     @property
     def slope_options(self) -> set[digitizer.TriggerSlope]:
         return {digitizer.TriggerSlope.RISING, digitizer.TriggerSlope.FALLING}
+
+    @property
+    def level(self) -> units.Voltage:
+        trig_params = self._get_event_source_trig_params()
+        return units.Voltage(trig_params.pin[0].threshold)
+    
+    @level.setter
+    def level(self, level: units.Voltage):
+        if not self.level_limits.within_range(level):
+            raise ValueError(f"Trigger level, {level} is outside the current trigger source range")
+
+        trig_params = self._get_event_source_trig_params()
+        trig_params.pin[0].threshold = float(level)
+        self._dev.SetParameters(trig_params)
+    
+    @property
+    def level_limits(self) -> units.VoltageRange:
+        if self.source == digitizer.TriggerSource.EXTERNAL:
+            # will need to switch on TRIG port impedance
+            return units.VoltageRange("0 V", "2.8 V")
+        elif self.source in [digitizer.TriggerSource.CHANNEL_A, digitizer.TriggerSource.CHANNEL_B, digitizer.TriggerSource.CHANNEL_C, digitizer.TriggerSource.CHANNEL_D]:
+            raise NotImplementedError("Triggering on Channels not implemented yet")
+        else:
+            raise RuntimeError("Invalid trigger source")
+        
+    @property
+    def external_coupling(self):
+        pass
+
+    @property
+    def external_coupling_options(self):
+        pass
+
+    @property
+    def external_range(self):
+        pass
+
+    @property
+    def external_range_options(self):
+        pass
+        
 
 
 class TeledyneDigitizer(digitizer.Digitizer):
@@ -423,7 +476,7 @@ class TeledyneDigitizer(digitizer.Digitizer):
         self.sample_clock: TeledyneSampleClock = TeledyneSampleClock(self._dev)
 
         self.trigger: TeledyneTrigger = TeledyneTrigger(self._dev, self.channels)
-
+        a=1
         # self.acquire: AlazarAcquire = AlazarAcquire(self._board, self.sample_clock, self.channels)
         
         # self.aux_io: AlazarAuxiliaryIO = AlazarAuxiliaryIO(self._board)
@@ -443,3 +496,10 @@ class TeledyneDigitizer(digitizer.Digitizer):
 
 if __name__ == "__main__":
     digi = TeledyneDigitizer()
+    print(digi.trigger.source)
+    digi.trigger.source = digitizer.TriggerSource.EXTERNAL
+    print(digi.trigger.source)
+
+    print(digi.channels[0].offset)
+    digi.channels[0].offset = units.Voltage('.11 V')
+    print(digi.channels[0].offset)
