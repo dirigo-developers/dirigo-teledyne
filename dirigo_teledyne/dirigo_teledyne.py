@@ -1,9 +1,8 @@
 from functools import cached_property
 from typing import cast
-import math
 
 import pyadq
-from pyadq import ADQControlUnit, ADQ, ADQParameters, ADQInfoListEntry
+from pyadq import ADQControlUnit, ADQ
 
 from dirigo import units
 from dirigo.hw_interfaces import digitizer  
@@ -26,7 +25,48 @@ Classes:
 """
 
 
-class TeledyneChannel(digitizer.Channel):
+class _TeledyneParameterMixin:
+    """Provides helper methods to get ADQ parameter structures"""
+    _dev: "ADQ"
+    
+    def _get_const_params(self) -> pyadq.ADQConstantParameters:
+        return cast(
+            pyadq.ADQConstantParameters,
+            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_CONSTANT)
+        )
+    
+    def _get_acq_params(self) -> pyadq.ADQDataAcquisitionParameters:
+        return cast(
+            pyadq.ADQDataAcquisitionParameters,
+            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_DATA_ACQUISITION)
+        )
+    
+    def _get_transf_params(self) -> pyadq.ADQDataTransferParameters:
+        return cast(
+            pyadq.ADQDataTransferParameters,
+            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_DATA_TRANSFER)
+        )
+    
+    def _get_afe_params(self):
+        return cast(
+            pyadq.ADQAnalogFrontendParameters,
+            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_ANALOG_FRONTEND)
+        )
+    
+    def _get_clk_params(self):
+        return cast(
+            pyadq.ADQClockSystemParameters,
+            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_CLOCK_SYSTEM)
+        )
+    
+    def _get_event_source_trig_params(self) -> pyadq.ADQEventSourcePortParameters:
+        return cast(
+            pyadq.ADQEventSourcePortParameters,
+            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_EVENT_SOURCE_TRIG)
+        )
+
+
+class TeledyneChannel(digitizer.Channel, _TeledyneParameterMixin):
     """
     Configures the parameters for individual input channels on a Teledyne ADQ 
     digitizer.
@@ -56,6 +96,20 @@ class TeledyneChannel(digitizer.Channel):
     def index(self) -> int:
         return self._index
     
+    @property
+    def enabled(self) -> bool:
+        """Indicates whether the channel is enabled for acquisition."""
+        return self._enabled
+    
+    @enabled.setter
+    def enabled(self, enable: bool):
+        """Enable or disable the channel."""
+        if not isinstance(enable, bool):
+            raise ValueError("`enabled` must be set with a boolean")
+        acq_params = self._get_acq_params()
+        acq_params.channel[self.index].nof_records = 1 if enable else 0
+        self._dev.SetParameters(acq_params)
+
     @property
     def coupling(self) -> digitizer.ChannelCoupling:
         if self._coupling is None:
@@ -127,19 +181,13 @@ class TeledyneChannel(digitizer.Channel):
         afe_params = self._get_afe_params()
         afe_params.channel[self._index].dc_offset = float(offset) * 1000 # V->mV
         self._dev.SetParameters(afe_params)
-    
-    def _get_afe_params(self):
-        return cast(
-            pyadq.ADQAnalogFrontendParameters,
-            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_ANALOG_FRONTEND)
-        )
 
     @property
     def offset_range(self) -> units.VoltageRange:
         return units.VoltageRange("-250 mV", "250 mV")
 
 
-class TeledyneSampleClock(digitizer.SampleClock):
+class TeledyneSampleClock(digitizer.SampleClock, _TeledyneParameterMixin):
     """
     Configures the sample clock for a Teledyne SP Devices digitizer.
 
@@ -165,12 +213,6 @@ class TeledyneSampleClock(digitizer.SampleClock):
         
         # Default clock edge, set to rising
         self._edge: digitizer.SampleClockEdge = digitizer.SampleClockEdge.RISING
-    
-    def _get_clk_params(self):
-        return cast(
-            pyadq.ADQClockSystemParameters,
-            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_CLOCK_SYSTEM)
-        )
     
     @property
     def source(self) -> digitizer.SampleClockSource:
@@ -266,7 +308,7 @@ class TeledyneSampleClock(digitizer.SampleClock):
         return {digitizer.SampleClockEdge.RISING}
 
 
-class TeledyneTrigger(digitizer.Trigger):
+class TeledyneTrigger(digitizer.Trigger, _TeledyneParameterMixin):
     """
     Configures triggering behavior for a Teledyne ADQ digitizer.
 
@@ -292,8 +334,8 @@ class TeledyneTrigger(digitizer.Trigger):
         digitizer.TriggerSource.CHANNEL_D:  pyadq.ADQ_EVENT_SOURCE_LEVEL_CHANNEL3,
     }
     _trigger_slope_mapping = {
-        digitizer.TriggerSlope.RISING:   pyadq.ADQ_EDGE_RISING,
-        digitizer.TriggerSlope.FALLING:  pyadq.ADQ_EDGE_FALLING,
+        digitizer.TriggerSlope.RISING:      pyadq.ADQ_EDGE_RISING,
+        digitizer.TriggerSlope.FALLING:     pyadq.ADQ_EDGE_FALLING,
     }
 
     def __init__(self, device: ADQ, channels: tuple[TeledyneChannel, ...]):
@@ -303,19 +345,7 @@ class TeledyneTrigger(digitizer.Trigger):
         # Set parameters to None to signify that they have not been initialized
         self._slope: digitizer.TriggerSlope | None = None
         self._external_coupling: digitizer.ExternalTriggerCoupling | None = None
-        self._external_range: units.VoltageRange | digitizer.ExternalTriggerRange | None = None
-
-    def _get_acq_params(self) -> pyadq.ADQDataAcquisitionParameters:
-        return cast(
-            pyadq.ADQDataAcquisitionParameters,
-            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_DATA_ACQUISITION)
-        )
-    
-    def _get_event_source_trig_params(self) -> pyadq.ADQEventSourcePortParameters:
-        return cast(
-            pyadq.ADQEventSourcePortParameters,
-            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_EVENT_SOURCE_TRIG)
-        )
+        self._external_range: units.VoltageRange | digitizer.ExternalTriggerRange | None = None    
 
     @property
     def source(self) -> digitizer.TriggerSource:
@@ -430,58 +460,63 @@ class TeledyneTrigger(digitizer.Trigger):
         return {units.VoltageRange("0 V", "2.8 V")}
         
 
-class TeledyneAcquire(digitizer.Acquire):
-    def __init__(self, channels: tuple[TeledyneChannel, ...]):
+class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
+    def __init__(self, device: ADQ, channels: tuple[TeledyneChannel, ...]):
+        self._dev = device
         self._channels = channels
 
         self._records_per_buffer: int = 1 # default, but in practice usually use >>1
+        self._buffers_per_acquisition: int = 1
+        self._buffers_allocated: int = 1
+        self._timestamps_enabled: bool = True
 
-    def _get_acq_params(self) -> pyadq.ADQDataAcquisitionParameters:
-        return cast(
-            pyadq.ADQDataAcquisitionParameters,
-            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_DATA_ACQUISITION)
-        )
+        self._buffers_acquired: int = 0 # the start sequence should always reset this to 0
 
     @property
-    def trigger_delay_samples(self) -> int:
-        """
-        Delay between trigger event and acquisition start, in sample clock periods.
+    def trigger_offset(self) -> int:
+        acq_params = self._get_acq_params()
+        return acq_params.channel[0].horizontal_offset
+
+    @trigger_offset.setter
+    def trigger_offset(self, offset: int):
+        offset = int(offset)
+        if not self.trigger_offset_range.within_range(offset):
+            raise ValueError(f"Invalid trigger offset {offset}. "
+                             f"Valid range: {self.trigger_offset_range}")
+        if offset > 0:      # delay
+            if (offset % self.trigger_delay_resolution) != 0:
+                raise ValueError(f"Invalid trigger offset {offset}. "
+                                 f"Must be multiple of {self.trigger_delay_resolution}")
+        elif offset < 0:    # pre-trigger
+            if (offset % self.pre_trigger_resolution) != 0:
+                raise ValueError(f"Invalid trigger offset {offset}. "
+                                 f"Must be multiple of {self.pre_trigger_resolution}")
         
-        Use `trigger_delay_duration` for the same setting in terms of time.
-        """
-        # Arguably could be part of Trigger object, but put here because of role
-        # in acquisition timing
-        pass
-
-    @trigger_delay_samples.setter
-    def trigger_delay_samples(self, samples: int):
-        """Set the trigger delay, in sample clock periods."""
-        pass
-    
-    @property
-    def trigger_delay_duration(self) -> units.Time:
-        pass # TODO, is this really needed?
+        acq_params = self._get_acq_params()
+        for i in range(len(self._channels)):
+            acq_params.channel[i].horizontal_offset = offset
+        self._dev.SetParameters(acq_params)
 
     @property
-    def trigger_delay_sample_resolution(self) -> int:
-        pass
+    def trigger_offset_range(self) -> units.IntRange:
+        return units.IntRange(-16360, 34359738360) # 2**35 - 8 = 34359738360
 
     @property
-    def pre_trigger_samples(self): pass
-
-    @pre_trigger_samples.setter
-    def pre_trigger_samples(self, value): pass
+    def pre_trigger_resolution(self) -> int:
+        return 8
 
     @property
-    def pre_trigger_resolution(self): pass
+    def trigger_delay_resolution(self) -> int:
+        return 8
 
     @property
     def record_length(self) -> int:
-        acq_params = self._get_acq_params(self)
+        acq_params = self._get_acq_params()
         return int(acq_params.channel[0].record_length)
 
     @record_length.setter
     def record_length(self, length: int):
+        # TODO should we support pyadq.ADQ_INFINITE_RECORD_LENGTH (=-1)?
         length = int(length)
         if length < self.record_length_minimum:
             raise ValueError(f"Invalid record length {length}. "
@@ -490,15 +525,10 @@ class TeledyneAcquire(digitizer.Acquire):
             raise ValueError(f"Invalid record length {length}. "
                              f"Must be multiple of {self.record_length_resolution}")
 
-        acq_params = self._get_acq_params(self)
-        for i in range():
+        acq_params = self._get_acq_params()
+        for i in range(len(self._channels)):
             acq_params.channel[i].record_length = length
         self._dev.SetParameters(acq_params)
-
-    @property
-    def record_duration(self) -> units.Time:
-        """DEPRECATE"""
-        pass
 
     @property
     def record_length_minimum(self) -> int:
@@ -511,18 +541,130 @@ class TeledyneAcquire(digitizer.Acquire):
         return 1
     
     @property
+    def _record_size(self) -> int:
+        """Data record size in bytes."""
+        const_params = self._get_const_params()
+        return self.record_length * const_params.channel[0].nof_bytes_per_sample
+    
+    @property
     def records_per_buffer(self) -> int:
         return self._records_per_buffer
-
+    
     @records_per_buffer.setter
     def records_per_buffer(self, records: int):
         """Set the number of records per buffer."""
-        # TODO, add validation
-        acq_params = self._get_acq_params(self)
-        for i in range():
-            acq_params.channel[i].buffer_size = records * record_size
-        self._dev.SetParameters(acq_params)
+        records = int(records)
+        if records < 1:
+            raise ValueError(f"Invalid records per buffer {records}. "
+                             f"Must be greater than or equal to 1.")
+        # Simply store the validated parameter
+        self._records_per_buffer = records
 
+    @property
+    def buffers_per_acquisition(self) -> int:
+        return self._buffers_per_acquisition
+    
+    @buffers_per_acquisition.setter
+    def buffers_per_acquisition(self, buffers: int):
+        # TODO, is this a settable property in ADQ3?
+        if buffers == -1:
+            # -1 codes for unlimited buffers per acquisition
+            pass
+        else:
+            if buffers < 1:
+                raise ValueError(f"Attempted to set buffers per acquisition "
+                                 f"{buffers}, must be ≥ 1")
+        self._buffers_per_acquisition = buffers
+
+    @property
+    def buffers_allocated(self) -> int:
+        return self._buffers_allocated
+
+    @buffers_allocated.setter
+    def buffers_allocated(self, buffers: int):
+        buffers = int(buffers)
+        if buffers > pyadq.ADQ_MAX_NOF_BUFFERS or buffers < 2:
+            raise ValueError(
+                f"Invalid number of buffers {buffers}. Must be an integer "
+                f"between 2 and {pyadq.ADQ_MAX_NOF_BUFFERS}, inclusive.")
+        
+        transf_params = self._get_transf_params()
+        for i in range(len(self._channels)):
+            transf_params.channel[i].nof_buffers = buffers
+        self._dev.SetParameters(transf_params)
+
+        self._buffers_allocated = buffers
+
+    @property
+    def timestamps_enabled(self) -> bool:
+        """Enables hardware timestamps."""
+        return self._timestamps_enabled
+    
+    @timestamps_enabled.setter
+    def timestamps_enabled(self, enable: bool):
+        self._timestamps_enabled = enable
+
+    def start(self):
+        # const_params = self._get_const_params()
+        transf_params = self._get_transf_params()
+
+        # Calculate buffer size using hardware-specific bytes per sample
+        record_size = self._record_size
+        buffer_size = self.records_per_buffer * record_size
+        metadata_buffer_size = self.records_per_buffer * pyadq.SIZEOF_ADQ_GEN4_HEADER
+        
+        # TODO, is this not needed for static length records?
+        # # Ceil buffer size to requirements
+        # record_buffer_size = (
+        #     math.ceil(buffer_size / const_params.record_buffer_size_step)
+        #     * const_params.record_buffer_size_step
+        # )
+
+        # TODO Limit buffer size to prevent memory issues 
+        # The example caps at 512 kB, which is way too small, more reasonable max is ~64 MB
+
+        for i in range(len(self._channels)):
+            transf_params.channel[i].infinite_record_length_enabled = 0
+            transf_params.channel[i].dynamic_record_length_enabled = 0
+
+            transf_params.channel[i].record_size = record_size
+            transf_params.channel[i].record_buffer_size = buffer_size
+
+            if self.timestamps_enabled:
+                transf_params.channel[i].metadata_enabled = 1
+                transf_params.channel[i].metadata_buffer_size = metadata_buffer_size
+            else:
+                transf_params.channel[i].metadata_enabled = 0
+                transf_params.channel[i].metadata_buffer_size = 0
+            
+            transf_params.channel[i].nof_buffers = self.buffers_allocated
+
+            # don't adjust eject_buffer settings
+
+        self._dev.SetParameters(transf_params)
+        self._buffers_acquired = 0
+
+        result = self._dev.ADQ_StartDataAcquisition()
+        if result != pyadq.ADQ_EOK:
+            raise Exception(
+                f"ADQ_StartDataAcquisition failed with error code {result}. See log file."
+            )
+
+    def get_next_completed_buffer(self, acq_buffer: AcquisitionProduct):
+        self._buffers_acquired += 1
+        # TODO!
+
+    @property
+    def buffers_acquired(self) -> int:
+        return self._buffers_acquired
+
+    def stop(self):
+        result = self._dev.ADQ_StopDataAcquisition()
+        if result not in [pyadq.ADQ_EOK, pyadq.ADQ_EINTERRUPTED]:
+            raise Exception(
+                f"ADQ_StartDataAcquisition failed with error code {result}. "
+                f"See log file."
+            )
 
 
 class TeledyneDigitizer(digitizer.Digitizer):
@@ -544,6 +686,8 @@ class TeledyneDigitizer(digitizer.Digitizer):
         Ensure the digitizer hardware is correctly connected and initialized
         before creating an instance of this class.
     """
+    SUPPORTED_DEVICES = {pyadq.PID_ADQ32} # Add more as we can test them
+
     def __init__(self, device_index: int = 0, **kwargs):
         self.input_mode = digitizer.InputMode.ANALOG    # Teledyne ADQ cards are analog
         self.streaming_mode = digitizer.StreamingMode.TRIGGERED  # Only triggered modes supported
@@ -563,17 +707,13 @@ class TeledyneDigitizer(digitizer.Digitizer):
             raise RuntimeError(f"Device index {device_index} out of range. "
                                f"Found {ndevices} devices")
         
+        if device_list[device_index].ProductID not in self.SUPPORTED_DEVICES:
+            raise RuntimeError(f"Teledyne digitizer {device_list[device_index].ProductID} " 
+                               f"no supported at this time.")
+        
         self.api_revision = self._acu.api_revision
         
         self._dev = self._acu.SetupDevice(device_index) # takes about 3 sec
-
-        # TODO, check device model and confirm that it matches list of supported devices
-
-        # Build full parameter list. TODO: not sure we want to store the top level parameters
-        self._adq_params = cast(
-            pyadq.ADQParameters, 
-            self._dev.InitializeParameters(pyadq.ADQ_PARAMETER_ID_TOP)
-        )
 
         chan_list = []
         for i in range(int(self._dev.ADQ_GetNofChannels())): 
@@ -583,14 +723,15 @@ class TeledyneDigitizer(digitizer.Digitizer):
         self.sample_clock: TeledyneSampleClock = TeledyneSampleClock(self._dev)
 
         self.trigger: TeledyneTrigger = TeledyneTrigger(self._dev, self.channels)
-        a=1
-        # self.acquire: AlazarAcquire = AlazarAcquire(self._board, self.sample_clock, self.channels)
+
+        self.acquire: TeledyneAcquire = TeledyneAcquire(self._dev, self.channels)
         
-        # self.aux_io: AlazarAuxiliaryIO = AlazarAuxiliaryIO(self._board)
+        # TODO AuxIO -- should we call this GPIO instead??
+        # self.aux_io: TeledyneAuxiliaryIO = TeledyneAuxiliaryIO(self._board)
 
     @property
     def bit_depth(self) -> int: 
-        return self.acquire._bit_depth
+        return 12 # Note the transfer bit depth may be different
 
     @cached_property
     def data_range(self) -> units.IntRange:
@@ -603,10 +744,22 @@ class TeledyneDigitizer(digitizer.Digitizer):
 
 if __name__ == "__main__":
     digi = TeledyneDigitizer()
-    print(digi.trigger.source)
-    digi.trigger.source = digitizer.TriggerSource.EXTERNAL
-    print(digi.trigger.source)
 
-    print(digi.channels[0].offset)
-    digi.channels[0].offset = units.Voltage('.11 V')
-    print(digi.channels[0].offset)
+    digi.channels[0].enabled = True
+    digi.channels[1].enabled = True
+    digi.channels[0].offset = units.Voltage('100 mV')
+
+    print(f"Sample clock set to {digi.sample_clock.rate}")
+
+    digi.trigger.source = digitizer.TriggerSource.EXTERNAL
+
+    digi.acquire.record_length = 1024
+    digi.acquire.records_per_buffer = 256
+    digi.acquire.buffers_allocated = 8
+    digi.acquire.trigger_offset = 0
+    digi.acquire.timestamps_enabled = True
+
+    # begin
+    digi.acquire.start()
+    # work work work work work
+    digi.acquire.stop()
