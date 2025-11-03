@@ -1,5 +1,6 @@
 from functools import cached_property
 from typing import cast
+import math
 
 import pyadq
 from pyadq import ADQControlUnit, ADQ, ADQParameters, ADQInfoListEntry
@@ -49,6 +50,8 @@ class TeledyneChannel(digitizer.Channel):
         self._impedance: units.Resistance = units.Resistance("50 ohm")
         self._range: units.VoltageRange = units.VoltageRange("-250 mV", "250 mV")
         
+        # We may want to set nof_records to nonzero here to avoid parameter updates being ignored
+    
     @property
     def index(self) -> int:
         return self._index
@@ -426,6 +429,100 @@ class TeledyneTrigger(digitizer.Trigger):
     def external_range_options(self):
         return {units.VoltageRange("0 V", "2.8 V")}
         
+
+class TeledyneAcquire(digitizer.Acquire):
+    def __init__(self, channels: tuple[TeledyneChannel, ...]):
+        self._channels = channels
+
+        self._records_per_buffer: int = 1 # default, but in practice usually use >>1
+
+    def _get_acq_params(self) -> pyadq.ADQDataAcquisitionParameters:
+        return cast(
+            pyadq.ADQDataAcquisitionParameters,
+            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_DATA_ACQUISITION)
+        )
+
+    @property
+    def trigger_delay_samples(self) -> int:
+        """
+        Delay between trigger event and acquisition start, in sample clock periods.
+        
+        Use `trigger_delay_duration` for the same setting in terms of time.
+        """
+        # Arguably could be part of Trigger object, but put here because of role
+        # in acquisition timing
+        pass
+
+    @trigger_delay_samples.setter
+    def trigger_delay_samples(self, samples: int):
+        """Set the trigger delay, in sample clock periods."""
+        pass
+    
+    @property
+    def trigger_delay_duration(self) -> units.Time:
+        pass # TODO, is this really needed?
+
+    @property
+    def trigger_delay_sample_resolution(self) -> int:
+        pass
+
+    @property
+    def pre_trigger_samples(self): pass
+
+    @pre_trigger_samples.setter
+    def pre_trigger_samples(self, value): pass
+
+    @property
+    def pre_trigger_resolution(self): pass
+
+    @property
+    def record_length(self) -> int:
+        acq_params = self._get_acq_params(self)
+        return int(acq_params.channel[0].record_length)
+
+    @record_length.setter
+    def record_length(self, length: int):
+        length = int(length)
+        if length < self.record_length_minimum:
+            raise ValueError(f"Invalid record length {length}. "
+                             f"Must be greater than {self.record_length_minimum}")
+        if (length % self.record_length_resolution) != 0:
+            raise ValueError(f"Invalid record length {length}. "
+                             f"Must be multiple of {self.record_length_resolution}")
+
+        acq_params = self._get_acq_params(self)
+        for i in range():
+            acq_params.channel[i].record_length = length
+        self._dev.SetParameters(acq_params)
+
+    @property
+    def record_duration(self) -> units.Time:
+        """DEPRECATE"""
+        pass
+
+    @property
+    def record_length_minimum(self) -> int:
+        """Minimum record length."""
+        return 2
+
+    @property
+    def record_length_resolution(self) -> int:
+        """Resolution of the record length setting."""
+        return 1
+    
+    @property
+    def records_per_buffer(self) -> int:
+        return self._records_per_buffer
+
+    @records_per_buffer.setter
+    def records_per_buffer(self, records: int):
+        """Set the number of records per buffer."""
+        # TODO, add validation
+        acq_params = self._get_acq_params(self)
+        for i in range():
+            acq_params.channel[i].buffer_size = records * record_size
+        self._dev.SetParameters(acq_params)
+
 
 
 class TeledyneDigitizer(digitizer.Digitizer):
