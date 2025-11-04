@@ -1,6 +1,7 @@
 from functools import cached_property
 from typing import cast
 import ctypes as ct
+import time
 
 import numpy as np
 import pyadq
@@ -602,16 +603,8 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
         record_size = self._record_size
         buffer_size = self.records_per_buffer * record_size
         metadata_buffer_size = self.records_per_buffer * pyadq.SIZEOF_ADQ_GEN4_HEADER
-        
-        # TODO, is this not needed for static length records?
-        # # Ceil buffer size to requirements
-        # record_buffer_size = (
-        #     math.ceil(buffer_size / const_params.record_buffer_size_step)
-        #     * const_params.record_buffer_size_step
-        # )
 
-        # TODO Limit buffer size to prevent memory issues 
-        # The example caps at 512 kB, which is way too small, more reasonable max is ~64 MB
+        # TODO Limit buffer size to avoid fragmented memory alloc 
 
         for i in range(len(self._channels)):
             acq_params.channel[i].horizontal_offset = self._trigger_offset
@@ -636,13 +629,13 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
 
             readout_params.channel[i].nof_record_buffers_in_array = pyadq.ADQ_FOLLOW_RECORD_TRANSFER_BUFFER
 
-            # don't adjust eject_buffer settings
-
         self._dev.SetParameters(acq_params)
         self._dev.SetParameters(transf_params)
         self._dev.SetParameters(readout_params)
         
         self._buffers_acquired = 0
+
+        self._temp = np.empty((self._records_per_buffer, self._record_length), np.int16)
 
         result = self._dev.ADQ_StartDataAcquisition()
         if result != pyadq.ADQ_EOK:
@@ -655,7 +648,8 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
         readout_status = _ADQDataReadoutStatus()
 
         chan = ct.c_int(pyadq.ADQ_ANY_CHANNEL)
-        timeout_ms = 1000
+        timeout_ms = 5000
+        
         ret = self._dev.ADQ_WaitForRecordBuffer(
             ct.byref(chan),
             ct.cast(ct.byref(api_buffer_array), ct.POINTER(ct.c_void_p)),
@@ -680,10 +674,9 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
         base_addr = int(ct.cast(rec0.data, ct.c_void_p).value or 0)
         
         total_bytes = self._records_per_buffer * self._record_size
-        RawU8 = ct.c_uint8 * total_bytes
-        raw = RawU8.from_address(base_addr)
-        flat = np.ctypeslib.as_array(raw).view(np.int16)
-        frames = flat.reshape(self._records_per_buffer, self._record_size // 2)
+        dst_addr = self._temp.ctypes.data  # destination base pointer
+        ct.memmove(dst_addr, base_addr, total_bytes)
+        # print(f"Got data, first 5 values: {self._temp[0,:5]}")
         
         res = self._dev.ADQ_ReturnRecordBuffer(ch, api_buffer_array)
         if res != pyadq.ADQ_EOK:
@@ -723,15 +716,15 @@ class TeledyneDigitizer(digitizer.Digitizer):
     """
     SUPPORTED_DEVICES = {pyadq.PID_ADQ32} # Add more as we can test them
 
-    def __init__(self, device_index: int = 0, **kwargs):
+    def __init__(self, device_index: int = 0, trace_logging: bool = True, **kwargs):
         self.input_mode = digitizer.InputMode.ANALOG    # Teledyne ADQ cards are analog
         self.streaming_mode = digitizer.StreamingMode.TRIGGERED  # Only triggered modes supported
 
         # Create the control unit
         self._acu = ADQControlUnit()
 
-        # TODO add option for ADQ API trace logging
-        self._acu.ADQControlUnit_EnableErrorTrace(pyadq.LOG_LEVEL_INFO, ".")
+        if trace_logging:
+            self._acu.ADQControlUnit_EnableErrorTrace(pyadq.LOG_LEVEL_INFO, ".")
 
         # Check device list
         device_list = self._acu.ListDevices() # takes about 1-2 sec, don't call this more than once (it will add duplicate device refernces to list)
@@ -790,21 +783,30 @@ if __name__ == "__main__":
     digi.trigger.source = digitizer.TriggerSource.EXTERNAL
     digi.trigger.level = units.Voltage('10 mV')
 
-    digi.acquire.record_length = 1024
-    digi.acquire.records_per_buffer = 384
-    digi.acquire.buffers_per_acquisition = 16
+    digi.acquire.record_length = 128
+    digi.acquire.records_per_buffer = 500_000
+    digi.acquire.buffers_per_acquisition = 64
     digi.acquire.buffers_allocated = 8
     digi.acquire.trigger_offset = 0
     digi.acquire.timestamps_enabled = True
 
     # hack
     parameters: pyadq.ADQParameters = digi._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_TOP)
-    parameters.event_source.periodic.frequency = 2e3
+    parameters.event_source.periodic.high = 0 # Reset periodic source w/ 0's
+    parameters.event_source.periodic.low = 0
+    parameters.event_source.periodic.period = 0
+    parameters.event_source.periodic.frequency = 5e6
     parameters.acquisition.channel[0].trigger_source = pyadq.ADQ_EVENT_SOURCE_PERIODIC
     parameters.acquisition.channel[1].trigger_source = pyadq.ADQ_EVENT_SOURCE_PERIODIC
+    parameters.acquisition.channel[0].trigger_edge = pyadq.ADQ_EDGE_RISING
+    parameters.acquisition.channel[1].trigger_edge = pyadq.ADQ_EDGE_RISING
     digi._dev.SetParameters(parameters)
 
     # begin
     digi.acquire.start()
-    digi.acquire.get_next_completed_buffer(1)
+    for i in range(2*digi.acquire.buffers_per_acquisition):
+        t0 = time.perf_counter()
+        digi.acquire.get_next_completed_buffer(1)
+        print(f"Time spent waiting for record buffer: {time.perf_counter()-t0}")
+
     digi.acquire.stop()
