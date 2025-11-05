@@ -89,6 +89,18 @@ class _TeledyneParameterMixin:
             pyadq.ADQPortParameters,
             self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_PORT_TRIG)
         )
+    
+    def _get_port_sync_params(self) -> pyadq.ADQPortParameters:
+        return cast(
+            pyadq.ADQPortParameters,
+            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_PORT_SYNC)
+        )
+    
+    def _get_function_params(self) -> pyadq.ADQFunctionParameters:
+        return cast(
+            pyadq.ADQFunctionParameters,
+            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_FUNCTION)
+        )
 
 
 class TeledyneChannel(digitizer.Channel, _TeledyneParameterMixin):
@@ -469,7 +481,6 @@ class TeledyneTrigger(digitizer.Trigger, _TeledyneParameterMixin):
         else:
             raise RuntimeError("Invalid trigger source")
     
-    # ADQ32 supports 
     @property
     def external_coupling(self) -> digitizer.ExternalTriggerCoupling:
         # Teledyne ADQ32 only supports DC coupling for external triggers
@@ -713,6 +724,9 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
             )
 
     def get_next_completed_buffer(self, acq_buffer: AcquisitionProduct):
+        #hack
+        if acq_buffer is None:
+            return
         api_buffer_array = ct.POINTER(_ADQGen4RecordArray)() 
         readout_status = _ADQDataReadoutStatus()
 
@@ -788,6 +802,40 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
             )
 
 
+class TeledyneAuxiliaryIO(digitizer.AuxiliaryIO, _TeledyneParameterMixin):
+    def __init__(self, device: ADQ):
+        self._dev = device
+        self._mode: digitizer.AuxiliaryIOEnums | None = None
+
+    def configure_mode(self, mode: digitizer.AuxiliaryIOEnums, **kwargs):
+        if mode == digitizer.AuxiliaryIOEnums.OutTrigger:
+            func_params = self._get_function_params()
+            func_params.pulse_generator[0].source   = pyadq.ADQ_EVENT_SOURCE_TRIG
+            func_params.pulse_generator[0].edge     = pyadq.ADQ_EDGE_RISING # not sure what this does?
+            func_params.pulse_generator[0].length   = 32 # TODO, make not arbitrary, or set to -1?
+            # ADQ32, ADQ33
+            # – 2CH: valid range of −1, 8, 16, ..., 2^19 − 8
+            # – 1CH: valid range of −1, 16, 32, ..., 2^20 − 16
+            # Setting the length to -1 will generate a pulse with length equal to that of the source
+
+            port_params = self._get_port_sync_params()
+            #port_params.pin[0].function       = pyadq.ADQ_FUNCTION_PULSE_GENERATOR0
+            port_params.pin[0].function       = pyadq.ADQ_FUNCTION_RECORD_STOP
+            port_params.pin[0].direction      = pyadq.ADQ_DIRECTION_OUT
+            port_params.pin[0].invert_output  = 0
+
+            self._dev.SetParameters(func_params)
+            self._dev.SetParameters(port_params)
+
+            self._mode = mode
+
+    def read_input(self) -> bool:
+        raise NotImplementedError
+
+    def write_output(self, state: bool):
+        raise NotImplementedError
+
+
 class TeledyneDigitizer(digitizer.Digitizer):
     """
     Combines all components into a complete digitizer interface for Teledyne SP 
@@ -848,8 +896,7 @@ class TeledyneDigitizer(digitizer.Digitizer):
 
         self.acquire: TeledyneAcquire = TeledyneAcquire(self._dev, self.channels)
         
-        # TODO AuxIO -- should we call this GPIO instead??
-        # self.aux_io: TeledyneAuxiliaryIO = TeledyneAuxiliaryIO(self._board)
+        self.aux_io: TeledyneAuxiliaryIO = TeledyneAuxiliaryIO(self._dev)
 
     @property
     def bit_depth(self) -> int: 

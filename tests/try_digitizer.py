@@ -29,6 +29,8 @@ digi.acquire.buffers_allocated = 8
 digi.acquire.trigger_offset = 0
 digi.acquire.timestamps_enabled = True
 
+digi.aux_io.configure_mode(digitizer.AuxiliaryIOEnums.OutTrigger)
+
 # to use internal periodic source as trigger ...
 # parameters: pyadq.ADQParameters = digi._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_TOP)
 # parameters.event_source.periodic.high = 0 # Reset periodic source w/ 0's
@@ -39,13 +41,13 @@ digi.acquire.timestamps_enabled = True
 # parameters.acquisition.channel[1].trigger_source = pyadq.ADQ_EVENT_SOURCE_PERIODIC
 # parameters.acquisition.channel[0].trigger_edge = pyadq.ADQ_EDGE_RISING
 # parameters.acquisition.channel[1].trigger_edge = pyadq.ADQ_EDGE_RISING
-# digi._dev.SetParameters(parameters)
+# digi._dev.SetParameters(parameters) 
 
 # begin
 digi.acquire.start()
 for i in range(2 * digi.acquire.buffers_per_acquisition):
     t0 = time.perf_counter()
-    digi.acquire.get_next_completed_buffer(1)
+    digi.acquire.get_next_completed_buffer(acq_buffer=None)
     #print(f"Time spent waiting for record buffer: {time.perf_counter()-t0}")
 
 digi.acquire.stop()
