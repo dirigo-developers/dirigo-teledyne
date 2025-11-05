@@ -6,7 +6,10 @@ import time
 import numpy as np
 import pyadq
 from pyadq import ADQControlUnit, ADQ
-from pyadq.structs import _ADQGen4Record, _ADQGen4RecordArray, _ADQDataReadoutStatus
+from pyadq.structs import (
+    _ADQGen4Record, _ADQGen4RecordArray, _ADQGen4RecordHeader, 
+    _ADQDataReadoutStatus
+)
 
 from dirigo import units
 from dirigo.hw_interfaces import digitizer  
@@ -68,10 +71,17 @@ class _TeledyneParameterMixin:
             pyadq.ADQEventSourcePortParameters,
             self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_EVENT_SOURCE_TRIG)
         )
+    
     def _get_readout_params(self) -> pyadq.ADQDataReadoutParameters:
         return cast(
             pyadq.ADQDataReadoutParameters,
             self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_DATA_READOUT)
+        )
+    
+    def _get_skip_params(self) -> pyadq.ADQSampleSkipParameters:
+        return cast(
+            pyadq.ADQSampleSkipParameters,
+            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_SAMPLE_SKIP)
         )
 
 
@@ -224,6 +234,10 @@ class TeledyneSampleClock(digitizer.SampleClock, _TeledyneParameterMixin):
         
         # Default clock edge, set to rising
         self._edge: digitizer.SampleClockEdge = digitizer.SampleClockEdge.RISING
+
+        # sampling rate depends on number of channels enabled at (?) firmware level
+        clk_params = self._get_clk_params()
+        self._base_sampling_rate = units.SampleRate(clk_params.sampling_frequency)
     
     @property
     def source(self) -> digitizer.SampleClockSource:
@@ -258,26 +272,30 @@ class TeledyneSampleClock(digitizer.SampleClock, _TeledyneParameterMixin):
     @property
     def rate(self) -> units.SampleRate:
         """
-        Depending on the clock source, either the internal sample clock rate, or
-        the user-specified external clock rate.
+        Returns the effective sampling rate: the base rate divided by the skip 
+        factor.
         """
-        clk_params = self._get_clk_params()
-        return units.SampleRate(clk_params.sampling_frequency)
+        skip_params = self._get_skip_params()
+        skip = skip_params.channel[0].skip_factor
+        return units.SampleRate(self._base_sampling_rate / skip)
     
     @rate.setter
-    def rate(self, rate: units.SampleRate):
+    def rate(self, rate: units.SampleRate): # note, this can take a long time to return
         if self._source is None:
             raise ValueError("`source` must be set before attempting to set `rate`")
 
         if self._source == digitizer.SampleClockSource.INTERNAL:
-            # Check if proposed rate is within valid range
-            valid_range = cast(set[units.SampleRate], self.rate_options)
-            if rate not in valid_range:
+            # Check if proposed rate matches a valid rate
+            valid_rates = cast(set[units.SampleRate], self.rate_options) # cast b/c we know only discrete rates are possible
+            if rate not in valid_rates:
+                # TODO, do we want to support rounding to nearest rate, say when the proposed rate is within 5%?
                 raise ValueError(f"Invalid sample clock rate: {rate}. "
-                                 f"Valid options: {valid_range}")
-            clk_params = self._get_clk_params()
-            clk_params.sampling_frequency = float(rate)
-            self._dev.SetParameters(clk_params)
+                                 f"Valid options: {valid_rates}")
+            
+            skip_params = self._get_skip_params()
+            for i in range(2): # don't have reference to channels yet, so just set them all
+                skip_params.channel[i].skip_factor = round(self._base_sampling_rate / rate)
+            self._dev.SetParameters(skip_params)
 
         elif self._source == digitizer.SampleClockSource.EXTERNAL:
             raise NotImplementedError("External clocks not yet implemented")
@@ -285,15 +303,24 @@ class TeledyneSampleClock(digitizer.SampleClock, _TeledyneParameterMixin):
         else:
             raise RuntimeError(f"Invalid sample clock source: {self._source}")
     
+    def _valid_skip_factors(self, channels_enabled: int = 2) -> list[int]:
+        # Note that this is a subset of the actual supported skip factors
+        # providing a list of all the supported values (4 million) would take too long
+        high_range = [20, 25, 50, 100, 125, 250, 500, 1250, 2500]
+        if channels_enabled == 2:
+            return [1, 2, 4, 5, 8, 9, 10] + high_range
+        elif channels_enabled == 1:
+            return [1, 2, 4, 5, 8, 16, 17, 18] + high_range
+        else:
+            raise ValueError("Unsupported channel configuration for ADQ32/33")
+    
     @property
     def rate_options(self) -> set[units.SampleRate] | units.SampleRateRange:
         if self._source is None:
             raise RuntimeError("`source` must be set before attempting to access rate options")
         
         if self._source == digitizer.SampleClockSource.INTERNAL:
-            # Generally fixed, but depends on card & no. channels enabled
-            # TODO, get programmatically
-            return {units.SampleRate("2.5 GS/s")}
+            return {self._base_sampling_rate / s for s in self._valid_skip_factors()}
         
         if self._source == digitizer.SampleClockSource.EXTERNAL:
             raise NotImplementedError("Haven't completed external clocking")
@@ -475,6 +502,7 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
         self._buffers_per_acquisition: int = 1
         self._buffers_allocated: int = 1
         self._timestamps_enabled: bool = True
+        self._t0: int | None = None
 
         self._buffers_acquired: int = 0 # the start sequence should always reset this to 0
 
@@ -621,19 +649,23 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
             if self.timestamps_enabled:
                 transf_params.channel[i].metadata_enabled = 1
                 transf_params.channel[i].metadata_buffer_size = metadata_buffer_size
-            else:
-                transf_params.channel[i].metadata_enabled = 0
-                transf_params.channel[i].metadata_buffer_size = 0
+            # else:
+            #     # there's no way to turn off metadata when in readout mode
+            #     transf_params.channel[i].metadata_enabled = 0
+            #     transf_params.channel[i].metadata_buffer_size = 0
             
             transf_params.channel[i].nof_buffers = self.buffers_allocated
 
             readout_params.channel[i].nof_record_buffers_in_array = pyadq.ADQ_FOLLOW_RECORD_TRANSFER_BUFFER
+
+            
 
         self._dev.SetParameters(acq_params)
         self._dev.SetParameters(transf_params)
         self._dev.SetParameters(readout_params)
         
         self._buffers_acquired = 0
+        self._t0 = None # if timestamps enabled, this will be replaced with first timestamp integer
 
         self._temp = np.empty((self._records_per_buffer, self._record_length), np.int16)
 
@@ -671,12 +703,36 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
 
         rec0_ptr = arr.record[0]            # ADQGen4Record*
         rec0 = rec0_ptr.contents            # ADQGen4Record
-        base_addr = int(ct.cast(rec0.data, ct.c_void_p).value or 0)
+        base_addr = int(ct.cast(rec0.data, ct.c_void_p).value or 0) # address of the first record in buffer
         
         total_bytes = self._records_per_buffer * self._record_size
-        dst_addr = self._temp.ctypes.data  # destination base pointer
+        dst_addr = acq_buffer.data.ctypes.data  # destination base pointer
         ct.memmove(dst_addr, base_addr, total_bytes)
-        # print(f"Got data, first 5 values: {self._temp[0,:5]}")
+
+        if self._timestamps_enabled:
+            hdr0_ptr = int(ct.cast(rec0.header, ct.c_void_p).value or 0)
+            
+            Raw = ct.c_ubyte * (self._records_per_buffer * pyadq.SIZEOF_ADQ_GEN4_HEADER)
+            buf = Raw.from_address(hdr0_ptr)
+
+            dt = np.dtype({
+                'names'  : ['timestamp'],
+                'formats': [np.uint64],
+                'offsets': [8],                             # offset to timestamp
+                'itemsize': pyadq.SIZEOF_ADQ_GEN4_HEADER,   # stride between headers
+            })
+            timestamps_raw = np.frombuffer(                     # shape (N,)
+                buffer  = buf,
+                dtype   = dt,
+                count   = self._records_per_buffer
+            )['timestamp']
+
+            if self._t0 is None:
+                self._t0 = timestamps_raw[0]
+                hdr0 = ct.cast(hdr0_ptr, ct.POINTER(_ADQGen4RecordHeader)).contents
+                self._time_unit = float(hdr0.time_unit)
+
+            acq_buffer.timestamps = (timestamps_raw - self._t0) * self._time_unit
         
         res = self._dev.ADQ_ReturnRecordBuffer(ch, api_buffer_array)
         if res != pyadq.ADQ_EOK:
@@ -769,44 +825,3 @@ class TeledyneDigitizer(digitizer.Digitizer):
             max=2**(self.bit_depth-1) - 1 
         )
 
-
-
-if __name__ == "__main__":
-    digi = TeledyneDigitizer()
-
-    digi.channels[0].enabled = True
-    digi.channels[1].enabled = True
-    digi.channels[0].offset = units.Voltage('0 mV')
-
-    print(f"Sample clock set to {digi.sample_clock.rate}")
-
-    digi.trigger.source = digitizer.TriggerSource.EXTERNAL
-    digi.trigger.level = units.Voltage('10 mV')
-
-    digi.acquire.record_length = 128
-    digi.acquire.records_per_buffer = 500_000
-    digi.acquire.buffers_per_acquisition = 64
-    digi.acquire.buffers_allocated = 8
-    digi.acquire.trigger_offset = 0
-    digi.acquire.timestamps_enabled = True
-
-    # hack
-    parameters: pyadq.ADQParameters = digi._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_TOP)
-    parameters.event_source.periodic.high = 0 # Reset periodic source w/ 0's
-    parameters.event_source.periodic.low = 0
-    parameters.event_source.periodic.period = 0
-    parameters.event_source.periodic.frequency = 5e6
-    parameters.acquisition.channel[0].trigger_source = pyadq.ADQ_EVENT_SOURCE_PERIODIC
-    parameters.acquisition.channel[1].trigger_source = pyadq.ADQ_EVENT_SOURCE_PERIODIC
-    parameters.acquisition.channel[0].trigger_edge = pyadq.ADQ_EDGE_RISING
-    parameters.acquisition.channel[1].trigger_edge = pyadq.ADQ_EDGE_RISING
-    digi._dev.SetParameters(parameters)
-
-    # begin
-    digi.acquire.start()
-    for i in range(2*digi.acquire.buffers_per_acquisition):
-        t0 = time.perf_counter()
-        digi.acquire.get_next_completed_buffer(1)
-        print(f"Time spent waiting for record buffer: {time.perf_counter()-t0}")
-
-    digi.acquire.stop()
