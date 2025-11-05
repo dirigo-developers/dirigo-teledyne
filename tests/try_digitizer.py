@@ -19,6 +19,7 @@ digi.sample_clock.rate = units.SampleRate("100 MS/s")
 print(f"Sample clock set to {digi.sample_clock.rate}")
 
 digi.trigger.source = digitizer.TriggerSource.EXTERNAL
+digi.trigger.external_impedance = digitizer.ExternalTriggerImpedance.HIGH
 digi.trigger.level = units.Voltage('250 mV')
 
 digi.acquire.record_length = 1024
@@ -42,7 +43,7 @@ digi.acquire.timestamps_enabled = True
 
 # begin
 digi.acquire.start()
-for i in range(2*digi.acquire.buffers_per_acquisition):
+for i in range(2 * digi.acquire.buffers_per_acquisition):
     t0 = time.perf_counter()
     digi.acquire.get_next_completed_buffer(1)
     #print(f"Time spent waiting for record buffer: {time.perf_counter()-t0}")

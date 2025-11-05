@@ -83,6 +83,12 @@ class _TeledyneParameterMixin:
             pyadq.ADQSampleSkipParameters,
             self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_SAMPLE_SKIP)
         )
+    
+    def _get_port_trig_params(self) -> pyadq.ADQPortParameters:
+        return cast(
+            pyadq.ADQPortParameters,
+            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_PORT_TRIG)
+        )
 
 
 class TeledyneChannel(digitizer.Channel, _TeledyneParameterMixin):
@@ -480,6 +486,37 @@ class TeledyneTrigger(digitizer.Trigger, _TeledyneParameterMixin):
     def external_coupling_options(self) -> set[digitizer.ExternalTriggerCoupling]:
         # Teledyne ADQ32 only supports DC coupling for external triggers
         return {digitizer.ExternalTriggerCoupling.DC}
+    
+    @property
+    def external_impedance(self) -> units.Resistance | digitizer.ExternalTriggerImpedance:
+        port_trig_params = self._get_port_trig_params()
+        api_imp = port_trig_params.pin[0].input_impedance
+        if api_imp == pyadq.ADQ_IMPEDANCE_50_OHM:
+            return units.Resistance("50 ohm")
+        elif api_imp == pyadq.ADQ_IMPEDANCE_HIGH:
+            return digitizer.ExternalTriggerImpedance.HIGH
+        else:
+            raise NotImplementedError(f"Unsupported trigger mode {api_imp}")
+
+    @external_impedance.setter
+    def external_impedance(self, imp: units.Resistance | digitizer.ExternalTriggerImpedance):
+        if imp not in self.external_impedance_options:
+            raise ValueError(f"Invalid external trigger impedance {imp}"
+                             f"Supported: {self.external_impedance_options}")
+        if imp == units.Resistance("50 ohm"):
+            api_imp = pyadq.ADQ_IMPEDANCE_50_OHM
+        elif imp == digitizer.ExternalTriggerImpedance.HIGH:
+            api_imp = pyadq.ADQ_IMPEDANCE_HIGH
+        else:
+            raise ValueError(f"Unsupported external trigger impedance {imp}")
+        
+        port_trig_params = self._get_port_trig_params()
+        port_trig_params.pin[0].input_impedance = api_imp
+        self._dev.SetParameters(port_trig_params)
+
+    @property
+    def external_impedance_options(self) -> set[units.Resistance | digitizer.ExternalTriggerImpedance]:
+        return {units.Resistance("50 ohm"), digitizer.ExternalTriggerImpedance.HIGH}
 
     @property
     def external_range(self): # this doesn't quite make sense here
