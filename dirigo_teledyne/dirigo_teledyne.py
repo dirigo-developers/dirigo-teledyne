@@ -99,6 +99,12 @@ class _TeledyneParameterMixin:
             self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_PORT_TRIG)
         )
     
+    def _get_port_gpio_params(self) -> pyadq.ADQPortParameters:
+        return cast(
+            pyadq.ADQPortParameters,
+            self._dev.GetParameters(pyadq.ADQ_PARAMETER_ID_PORT_GPIOA)
+        )
+    
     def _get_port_sync_params(self) -> pyadq.ADQPortParameters:
         return cast(
             pyadq.ADQPortParameters,
@@ -339,14 +345,15 @@ class TeledyneSampleClock(digitizer.SampleClock, _TeledyneParameterMixin):
         else:
             raise RuntimeError(f"Invalid sample clock source: {self._source}")
     
-    def _valid_skip_factors(self, channels_enabled: int = 2) -> list[int]:
+    @property
+    def _valid_skip_factors(self) -> list[int]:
         # Note that this is a subset of the actual supported skip factors
         # providing a list of all the supported values (4 million) would take too long
-        # TODO channels_enabled should be retrieved automatically, according to FW image
-        high_range = [20, 25, 50, 100, 125, 250, 500, 1250, 2500]
-        if channels_enabled == 2:
+        nchannels = self._dev.ADQ_GetNofChannels()
+        high_range = [20, 25, 50, 100, 125, 250, 500, 1250, 2500, 5000]
+        if nchannels == 2:
             return [1, 2, 4, 5, 8, 9, 10] + high_range
-        elif channels_enabled == 1:
+        elif nchannels == 1:
             return [1, 2, 4, 5, 8, 16, 17, 18] + high_range
         else:
             raise ValueError("Unsupported channel configuration for ADQ32")
@@ -388,7 +395,7 @@ class TeledyneSampleClock(digitizer.SampleClock, _TeledyneParameterMixin):
             raise RuntimeError("`source` must be set before attempting to access rate options")
         
         if self._source == digitizer.SampleClockSource.INTERNAL:
-            return {self._base_sampling_rate / s for s in self._valid_skip_factors()}
+            return {self._base_sampling_rate / s for s in self._valid_skip_factors}
         
         if self._source == digitizer.SampleClockSource.EXTERNAL:
             raise NotImplementedError("Haven't completed external clocking")
@@ -469,7 +476,8 @@ class TeledyneTrigger(digitizer.Trigger, _TeledyneParameterMixin):
         for i in range(len(self._chans)):
             acq_params.channel[i].trigger_source = self._trigger_source_mapping[source]
             # TODO test blocking with pattern generators
-            acq_params.channel[i].trigger_blocking_source = pyadq.ADQ_FUNCTION_INVALID 
+            #acq_params.channel[i].trigger_blocking_source = pyadq.ADQ_FUNCTION_INVALID 
+            acq_params.channel[i].trigger_blocking_source = pyadq.ADQ_FUNCTION_PATTERN_GENERATOR0 
         self._set_params(acq_params)
    
     @property
@@ -729,18 +737,18 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
         self._timestamps_enabled = enable
 
     def start(self):
-        params = self._get_params()
-
+        """Starts acquistion using the "data readout" mode."""
         # Calculate buffer size using hardware-specific bytes per sample
         record_size = self._record_size
         buffer_size = self.records_per_buffer * record_size
         metadata_buffer_size = self.records_per_buffer * pyadq.SIZEOF_ADQ_GEN4_HEADER
+        print(f"Buffer size (MB): {buffer_size/1024/1024:.2f}")
 
         # TODO Limit buffer size to avoid fragmented memory alloc, what is the hard limit? 
 
-        acq_params = params.acquisition
-        transf_params = params.transfer
-        readout_params = params.readout
+        acq_params = self._get_acq_params()
+        transf_params = self._get_transf_params()
+        readout_params = self._get_readout_params()
         for i in range(len(self._channels)):
             acq_params.channel[i].horizontal_offset = self._trigger_offset
             acq_params.channel[i].record_length = self._record_length
@@ -760,7 +768,9 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
             
             readout_params.channel[i].nof_record_buffers_in_array = pyadq.ADQ_FOLLOW_RECORD_TRANSFER_BUFFER
             
-        self._set_params(params)
+        self._set_params(acq_params)
+        self._set_params(transf_params)
+        self._set_params(readout_params)
         
         self._buffers_acquired = 0
         self._t0 = None # if timestamps enabled, this will be replaced with first timestamp integer
@@ -861,9 +871,9 @@ class TeledyneAuxiliaryIO(digitizer.AuxiliaryIO, _TeledyneParameterMixin):
             params = self._get_params()
 
             # Disable SYNC
-            sync_params = params.port[pyadq.ADQ_PORT_SYNC].pin[0]
-            sync_params.function       = pyadq.ADQ_FUNCTION_INVALID
-            sync_params.direction      = pyadq.ADQ_DIRECTION_OUT
+            gpio_params = params.port[pyadq.ADQ_PORT_SYNC].pin[0]
+            gpio_params.function       = pyadq.ADQ_FUNCTION_INVALID
+            gpio_params.direction      = pyadq.ADQ_DIRECTION_OUT
 
             # Disable GPIO
             gpio_params = params.port[pyadq.ADQ_PORT_GPIOA].pin[0]
@@ -875,71 +885,70 @@ class TeledyneAuxiliaryIO(digitizer.AuxiliaryIO, _TeledyneParameterMixin):
         elif mode == digitizer.AuxiliaryIOMode.OUT_TRIGGER:
             # This invovles 2 parts:
             # 1. Buffer the trigger signal out to SYNC
-            # 2. Emit a pulse on GPIO corresponding to beginning of acquisition
-            params = self._get_params()
+            # 2. Emit a pulse on GPIO corresponding to beginning of acquisition 
+            # TODO, make the pulse duration adjustable
 
             # Output trigger pulses in SYNC
-            params.function.pulse_generator[0].source   = pyadq.ADQ_EVENT_SOURCE_TRIG
-            params.function.pulse_generator[0].edge     = pyadq.ADQ_EDGE_RISING # not sure what this does?
-            params.function.pulse_generator[0].length   = -1 # TODO, does -1 work like we expect?
-            # ADQ32, ADQ33
-            # – 2CH: valid range of −1, 8, 16, ..., 2^19 − 8
-            # – 1CH: valid range of −1, 16, 32, ..., 2^20 − 16
-            # Setting the length to -1 will generate a pulse with length equal to that of the source
+            func_params = self._get_function_params()
+            func_params.pulse_generator[0].source   = pyadq.ADQ_EVENT_SOURCE_TRIG
+            func_params.pulse_generator[0].edge     = pyadq.ADQ_EDGE_RISING # not sure what this does?
+            func_params.pulse_generator[0].length   = -1 # TODO, does -1 work like we expect?
+            self._set_params(func_params)
+ 
+            sync_params = self._get_port_sync_params()
+            sync_params.pin[0].function       = pyadq.ADQ_FUNCTION_PULSE_GENERATOR0
+            sync_params.pin[0].direction      = pyadq.ADQ_DIRECTION_OUT
+            sync_params.pin[0].invert_output  = 0
+            self._set_params(sync_params)
 
-            sync_params = params.port[pyadq.ADQ_PORT_SYNC].pin[0]
-            sync_params.function       = pyadq.ADQ_FUNCTION_PULSE_GENERATOR0
-            sync_params.direction      = pyadq.ADQ_DIRECTION_OUT
-            sync_params.invert_output  = 0
+            func_params = self._get_function_params()
+            pg0_params = func_params.pattern_generator[0]
+            pg0_params.nof_instructions = 2
 
-            # pg0_params = params.function.pattern_generator[0]               # TODO, experiment with whether this is needed
-            # pg0_params.nof_instructions = 2
-            # pg0_params.instruction[0].op = pyadq.ADQ_PATTERN_GENERATOR_OPERATION_EVENT
-            # pg0_params.instruction[0].count = 1
-            # pg0_params.instruction[0].output_value = 1         # 1 means triggers blocked
-            # pg0_params.instruction[0].output_value_transition = 1
-            # pg0_params.instruction[0].source = pyadq.ADQ_EVENT_SOURCE_TRIG
-            # pg0_params.instruction[0].source_edge = pyadq.ADQ_EDGE_RISING
-            # pg0_params.instruction[1].op = pyadq.ADQ_PATTERN_GENERATOR_OPERATION_EVENT
-            # pg0_params.instruction[1].count = 1
-            # pg0_params.instruction[1].output_value = 0          # 0 means non-blocking
-            # pg0_params.instruction[1].output_value_transition = 0
-            # pg0_params.instruction[1].source = pyadq.ADQ_EVENT_SOURCE_INVALID # stay non-blocking
-
-            pg1_params = params.function.pattern_generator[0]
-            pg1_params.nof_instructions = 0
-
-            pg0_params = params.function.pattern_generator[1]
-            pg0_params.nof_instructions = 3
             pg0_params.instruction[0].op = pyadq.ADQ_PATTERN_GENERATOR_OPERATION_EVENT
             pg0_params.instruction[0].count = 1
-            pg0_params.instruction[0].output_value = 0
+            pg0_params.instruction[0].output_value = 1
             pg0_params.instruction[0].output_value_transition = 0
             pg0_params.instruction[0].source = pyadq.ADQ_EVENT_SOURCE_TRIG
             pg0_params.instruction[0].source_edge = pyadq.ADQ_EDGE_RISING
+            pg0_params.instruction[0].reset_source = pyadq.ADQ_FUNCTION_INVALID
+
             pg0_params.instruction[1].op = pyadq.ADQ_PATTERN_GENERATOR_OPERATION_EVENT
-            pg0_params.instruction[1].count = 3
-            pg0_params.instruction[1].output_value = 1
-            pg0_params.instruction[1].output_value_transition = 1
-            pg0_params.instruction[1].source = pyadq.ADQ_EVENT_SOURCE_TRIG
-            pg0_params.instruction[1].source_edge = pyadq.ADQ_EDGE_RISING
-            pg0_params.instruction[2].op = pyadq.ADQ_PATTERN_GENERATOR_OPERATION_EVENT
-            pg0_params.instruction[2].count = 1
-            pg0_params.instruction[2].output_value = 0
-            pg0_params.instruction[2].output_value_transition = 0
-            pg0_params.instruction[2].source = pyadq.ADQ_EVENT_SOURCE_INVALID
+            pg0_params.instruction[1].count = 1
+            pg0_params.instruction[1].output_value = 0
+            pg0_params.instruction[1].output_value_transition = 0
+            pg0_params.instruction[1].source = pyadq.ADQ_FUNCTION_INVALID
 
-            gpio_params = params.port[pyadq.ADQ_PORT_GPIOA].pin[0]
-            gpio_params.function       = pyadq.ADQ_FUNCTION_PATTERN_GENERATOR1
-            gpio_params.direction      = pyadq.ADQ_DIRECTION_OUT
-            gpio_params.invert_output  = 0
+            pg1_params = func_params.pattern_generator[1]
+            pg1_params.nof_instructions = 3
 
-            # TRY manually setting blocking here
-            params.acquisition.channel[0].trigger_blocking_source = pyadq.ADQ_FUNCTION_PATTERN_GENERATOR1
-            params.acquisition.channel[1].trigger_blocking_source = pyadq.ADQ_FUNCTION_PATTERN_GENERATOR1
+            step = self._timer_count_step
+            pg1_params.instruction[0].op = pyadq.ADQ_PATTERN_GENERATOR_OPERATION_TIMER
+            pg1_params.instruction[0].count = step # will give the min valid count
+            pg1_params.instruction[0].output_value = 0
+            pg1_params.instruction[0].output_value_transition = 0
+            pg1_params.instruction[0].source = pyadq.ADQ_EVENT_SOURCE_TRIG
+            pg1_params.instruction[0].source_edge = pyadq.ADQ_EDGE_RISING
 
-            self._set_params(params)
-            # This will immediately activate the TRIG -> SYNC forwarding
+            pg1_params.instruction[1].op = pyadq.ADQ_PATTERN_GENERATOR_OPERATION_TIMER
+
+            pg1_params.instruction[1].count = round(250_000/step) * step # 100 us @ 2.5 GHz, 50 us @ 5 GHz
+            pg1_params.instruction[1].output_value = 1
+            pg1_params.instruction[1].output_value_transition = 1
+
+            pg1_params.instruction[2].op = pyadq.ADQ_PATTERN_GENERATOR_OPERATION_EVENT
+            pg1_params.instruction[2].count = 1
+            pg1_params.instruction[2].output_value = 0
+            pg1_params.instruction[2].output_value_transition = 0
+            pg1_params.instruction[2].source = pyadq.ADQ_FUNCTION_INVALID
+
+            self._set_params(func_params)
+
+            gpio_params = self._get_port_gpio_params()
+            gpio_params.pin[0].function       = pyadq.ADQ_FUNCTION_PATTERN_GENERATOR1
+            gpio_params.pin[0].direction      = pyadq.ADQ_DIRECTION_OUT
+            gpio_params.pin[0].invert_output  = 0
+            self._set_params(gpio_params)
 
         else:
             raise NotImplementedError(f"Unsupported Aux IO mode {mode}")
@@ -951,6 +960,16 @@ class TeledyneAuxiliaryIO(digitizer.AuxiliaryIO, _TeledyneParameterMixin):
 
     def write_output(self, state: bool):
         raise NotImplementedError
+    
+    @property
+    def _timer_count_step(self) -> int:
+        nchannels = self._dev.ADQ_GetNofChannels()
+        if nchannels == 2:
+            return 8
+        elif nchannels == 1:
+            return 16
+        else:
+            raise RuntimeError(f"Invalid number of channels detected {nchannels}")
 
 
 class TeledyneDigitizer(digitizer.Digitizer):
@@ -1027,3 +1046,4 @@ class TeledyneDigitizer(digitizer.Digitizer):
             max=2**(self.bit_depth-1) - 1 
         )
 
+pyadq.ADQ_FUNCTION_INVALID
