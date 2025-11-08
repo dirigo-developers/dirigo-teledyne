@@ -607,6 +607,7 @@ class TeledyneTrigger(digitizer.Trigger, _TeledyneParameterMixin):
 
 class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
     def __init__(self, device: ADQ, channels: tuple[TeledyneChannel, ...]):
+        super().__init__()
         self._dev = device
         self._channels = channels
 
@@ -780,6 +781,7 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
             raise Exception(
                 f"ADQ_StartDataAcquisition failed with error code {result}. See log file."
             )
+        self._active.set()
 
     def get_next_completed_buffer(self, acq_buffer: AcquisitionProduct):
         
@@ -858,6 +860,7 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
                 f"ADQ_StartDataAcquisition failed with error code {result}. "
                 f"See log file."
             )
+        self._active.clear()
 
 
 class TeledyneAuxiliaryIO(digitizer.AuxiliaryIO, _TeledyneParameterMixin):
