@@ -44,7 +44,7 @@ try:
     digi.acquire.records_per_buffer = 1000
     digi.acquire.buffers_per_acquisition = 64
     digi.acquire.buffers_allocated = 8
-    digi.acquire.trigger_offset = 0
+    digi.acquire.trigger_delay = 0
     digi.acquire.timestamps_enabled = True
 
     digi.aux_io.configure_mode(digitizer.AuxiliaryIOMode.OUT_TRIGGER)

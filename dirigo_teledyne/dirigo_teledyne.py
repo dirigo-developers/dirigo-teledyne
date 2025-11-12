@@ -209,13 +209,13 @@ class TeledyneChannel(digitizer.Channel, _TeledyneParameterMixin):
         return {units.Resistance("50 ohm")}
     
     @property
-    def range(self) -> units.VoltageRange:
+    def input_range(self) -> units.VoltageRange:
         # Teledyne only supports 0.5 Vpp
         # TODO, should this range change depending on offset?
         return self._range
     
-    @range.setter
-    def range(self, rng: units.VoltageRange):
+    @input_range.setter
+    def input_range(self, rng: units.VoltageRange):
         if rng not in self.range_options:
             raise ValueError(f"Invalid input range {rng}. "
                              f"Valid options are: {self.range_options}")
@@ -433,7 +433,7 @@ class TeledyneTrigger(digitizer.Trigger, _TeledyneParameterMixin):
         slope (TriggerSlope): The trigger slope (e.g., "Positive", "Negative").
         level (Voltage): The trigger level in volts.
         external_coupling (ExternalTriggerCoupling): Coupling mode for the external trigger (e.g., "DC").
-        external_impedance (Resistance | ExternalTriggerImpedance): Impedance for external trigger.
+        external_impedance (Resistance | ImpedanceMode): Impedance for external trigger.
         external_range (VoltageRange): Voltage range for the external trigger.
     
     Notes: With ADQ3, it is possible to configure separate event triggers 
@@ -458,8 +458,8 @@ class TeledyneTrigger(digitizer.Trigger, _TeledyneParameterMixin):
 
         # Set parameters to None to signify that they have not been initialized
         self._slope: digitizer.TriggerSlope | None = None
-        self._external_impedance: units.Resistance | digitizer.ExternalTriggerImpedance | None = None
-        self._external_range: units.VoltageRange | digitizer.ExternalTriggerRange | None = None    
+        self._external_impedance: units.Resistance | digitizer.ImpedanceMode | None = None
+        self._external_range: units.VoltageRange | None = None    
 
     @property
     def source(self) -> digitizer.TriggerSource:
@@ -565,24 +565,24 @@ class TeledyneTrigger(digitizer.Trigger, _TeledyneParameterMixin):
         return {digitizer.ExternalTriggerCoupling.DC}
     
     @property
-    def external_impedance(self) -> units.Resistance | digitizer.ExternalTriggerImpedance:
+    def external_impedance(self) -> units.Resistance | digitizer.ImpedanceMode:
         port_trig_params = self._get_port_trig_params()
         api_imp = port_trig_params.pin[0].input_impedance
         if api_imp == pyadq.ADQ_IMPEDANCE_50_OHM:
             return units.Resistance("50 ohm")
         elif api_imp == pyadq.ADQ_IMPEDANCE_HIGH:
-            return digitizer.ExternalTriggerImpedance.HIGH
+            return digitizer.ImpedanceMode.HIGH
         else:
             raise NotImplementedError(f"Unsupported trigger mode {api_imp}")
 
     @external_impedance.setter
-    def external_impedance(self, imp: units.Resistance | digitizer.ExternalTriggerImpedance):
+    def external_impedance(self, imp: units.Resistance | digitizer.ImpedanceMode):
         if imp not in self.external_impedance_options:
             raise ValueError(f"Invalid external trigger impedance {imp}"
                              f"Supported: {self.external_impedance_options}")
         if imp == units.Resistance("50 ohm"):
             api_imp = pyadq.ADQ_IMPEDANCE_50_OHM
-        elif imp == digitizer.ExternalTriggerImpedance.HIGH:
+        elif imp == digitizer.ImpedanceMode.HIGH:
             api_imp = pyadq.ADQ_IMPEDANCE_HIGH
         else:
             raise ValueError(f"Unsupported external trigger impedance {imp}")
@@ -592,8 +592,8 @@ class TeledyneTrigger(digitizer.Trigger, _TeledyneParameterMixin):
         self._set_params(port_trig_params)
 
     @property
-    def external_impedance_options(self) -> set[units.Resistance | digitizer.ExternalTriggerImpedance]:
-        return {units.Resistance("50 ohm"), digitizer.ExternalTriggerImpedance.HIGH}
+    def external_impedance_options(self) -> set[units.Resistance | digitizer.ImpedanceMode]:
+        return {units.Resistance("50 ohm"), digitizer.ImpedanceMode.HIGH}
 
     @property
     def external_range(self):
@@ -611,7 +611,7 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
         self._dev = device
         self._channels = channels
 
-        self._trigger_offset: int = 0
+        self._trigger_delay: int = 0
         self._record_length: int = 0
 
         self._records_per_buffer: int = 1 # default, but in practice usually use >>1
@@ -623,19 +623,19 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
         self._buffers_acquired: int = -1 # the start sequence should always reset this to 0
 
     @property
-    def trigger_offset(self) -> int:
-        return self._trigger_offset
+    def trigger_delay(self) -> int:
+        return self._trigger_delay
 
-    @trigger_offset.setter
-    def trigger_offset(self, offset: int):
+    @trigger_delay.setter
+    def trigger_delay(self, offset: int):
         offset = int(offset)
-        if not self.trigger_offset_range.within_range(offset):
+        if not self.trigger_delay_range.within_range(offset):
             raise ValueError(f"Invalid trigger offset {offset}. "
-                             f"Valid range: {self.trigger_offset_range}")
+                             f"Valid range: {self.trigger_delay_range}")
         if offset > 0:      # delay
-            if (offset % self.trigger_delay_resolution) != 0:
+            if (offset % self.post_trigger_resolution) != 0:
                 raise ValueError(f"Invalid trigger offset {offset}. "
-                                 f"Must be multiple of {self.trigger_delay_resolution}")
+                                 f"Must be multiple of {self.post_trigger_resolution}")
         elif offset < 0:    # pre-trigger
             if (offset % self.pre_trigger_resolution) != 0:
                 raise ValueError(f"Invalid trigger offset {offset}. "
@@ -643,7 +643,7 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
         self._offset = offset
 
     @property
-    def trigger_offset_range(self) -> units.IntRange:
+    def trigger_delay_range(self) -> units.IntRange:
         return units.IntRange(-16360, 34359738360) # 2**35 - 8 = 34359738360
 
     @property
@@ -651,7 +651,7 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
         return 8
 
     @property
-    def trigger_delay_resolution(self) -> int:
+    def post_trigger_resolution(self) -> int:
         return 8
 
     @property
@@ -751,7 +751,7 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
         transf_params = self._get_transf_params()
         readout_params = self._get_readout_params()
         for i in range(len(self._channels)):
-            acq_params.channel[i].horizontal_offset = self._trigger_offset
+            acq_params.channel[i].horizontal_offset = self._trigger_delay
             acq_params.channel[i].record_length = self._record_length
             acq_params.channel[i].nof_records = \
                 max(self._records_per_buffer * self._buffers_per_acquisition, -1) # -1 codes for unlimited
