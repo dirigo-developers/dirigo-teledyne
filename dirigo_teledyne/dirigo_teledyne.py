@@ -633,13 +633,13 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
             raise ValueError(f"Invalid trigger offset {offset}. "
                              f"Valid range: {self.trigger_delay_range}")
         if offset > 0:      # delay
-            if (offset % self.post_trigger_resolution) != 0:
+            if (offset % self.post_trigger_delay_step) != 0:
                 raise ValueError(f"Invalid trigger offset {offset}. "
-                                 f"Must be multiple of {self.post_trigger_resolution}")
+                                 f"Must be multiple of {self.post_trigger_delay_step}")
         elif offset < 0:    # pre-trigger
-            if (offset % self.pre_trigger_resolution) != 0:
+            if (offset % self.pre_trigger_delay_step) != 0:
                 raise ValueError(f"Invalid trigger offset {offset}. "
-                                 f"Must be multiple of {self.pre_trigger_resolution}")
+                                 f"Must be multiple of {self.pre_trigger_delay_step}")
         self._offset = offset
 
     @property
@@ -647,11 +647,11 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
         return units.IntRange(-16360, 34359738360) # 2**35 - 8 = 34359738360
 
     @property
-    def pre_trigger_resolution(self) -> int:
+    def pre_trigger_delay_step(self) -> int:
         return 8
 
     @property
-    def post_trigger_resolution(self) -> int:
+    def post_trigger_delay_step(self) -> int:
         return 8
 
     @property
@@ -665,9 +665,9 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
         if length < self.record_length_minimum:
             raise ValueError(f"Invalid record length {length}. "
                              f"Must be greater than {self.record_length_minimum}")
-        if (length % self.record_length_resolution) != 0:
+        if (length % self.record_length_step) != 0:
             raise ValueError(f"Invalid record length {length}. "
-                             f"Must be multiple of {self.record_length_resolution}")
+                             f"Must be multiple of {self.record_length_step}")
         self._record_length = length
 
     @property
@@ -676,7 +676,7 @@ class TeledyneAcquire(digitizer.Acquire, _TeledyneParameterMixin):
         return 2
 
     @property
-    def record_length_resolution(self) -> int:
+    def record_length_step(self) -> int:
         """Resolution of the record length setting."""
         return 1
     
