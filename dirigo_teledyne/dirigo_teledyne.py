@@ -1049,4 +1049,3 @@ class TeledyneDigitizer(digitizer.Digitizer):
             max=2**(self.bit_depth-1) - 1 
         )
 
-pyadq.ADQ_FUNCTION_INVALID
